@@ -1,0 +1,4 @@
+interface:
+  display_name: "c2l"
+  short_description: "Convert chess.com URL to lichess analysis"
+  default_prompt: "Use $c2l to turn this chess.com live game URL into a lichess analysis link and explain the game in Korean."
