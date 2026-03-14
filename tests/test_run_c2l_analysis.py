@@ -70,12 +70,69 @@ class RunC2LAnalysisTests(unittest.TestCase):
             )
         )
 
+    def test_normalize_short_chesscom_url(self):
+        self.assertEqual(
+            MODULE.normalize_chesscom_game_url(
+                "https://www.chess.com/game/123456789?tab=review"
+            ),
+            "https://www.chess.com/game/live/123456789?tab=review",
+        )
+
     def test_resolve_c2l_command_prefers_explicit_override(self):
         command, source = MODULE.resolve_c2l_command(
             explicit_command=f"{sys.executable} /tmp/fake-c2l.py"
         )
         self.assertEqual(source, "explicit")
         self.assertEqual(command[0], sys.executable)
+
+    def test_resolve_c2l_command_reports_install_guidance_when_missing(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with mock.patch.object(MODULE.shutil, "which", return_value=None):
+                with self.assertRaises(FileNotFoundError) as excinfo:
+                    MODULE.resolve_c2l_command(repo_root=None)
+
+        self.assertIn("c2l is not installed", str(excinfo.exception))
+        self.assertIn("C2L_COMMAND", str(excinfo.exception))
+
+    def test_analyze_url_normalizes_short_input_before_running_c2l(self):
+        payload = {
+            "input_url": "https://www.chess.com/game/live/123456789",
+            "success": True,
+            "game_id": "abc123",
+            "analysis_url": "https://lichess.org/abc123",
+            "pgn": "1. e4 e5 2. Nf3 Nc6",
+            "retries": 0,
+            "error": None,
+        }
+
+        with mock.patch.object(MODULE, "resolve_c2l_command", return_value=(["c2l"], "path")):
+            with mock.patch.object(
+                MODULE,
+                "run_c2l",
+                return_value=(
+                    payload,
+                    mock.Mock(returncode=0, stderr=""),
+                ),
+            ) as run_c2l:
+                result = MODULE.analyze_url(
+                    "https://www.chess.com/game/123456789",
+                    skip_enrichment=True,
+                    timeout_seconds=5,
+                )
+
+        run_c2l.assert_called_once_with(
+            "https://www.chess.com/game/live/123456789",
+            ["c2l"],
+            5,
+        )
+        self.assertEqual(
+            result["original_input_url"],
+            "https://www.chess.com/game/123456789",
+        )
+        self.assertEqual(
+            result["input_url"],
+            "https://www.chess.com/game/live/123456789",
+        )
 
     def test_analyze_url_with_stub_and_skipped_enrichment(self):
         payload = {

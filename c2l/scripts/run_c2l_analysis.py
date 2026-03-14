@@ -15,16 +15,29 @@ from urllib import error as urlerror
 from urllib import parse as urlparse
 from urllib import request as urlrequest
 
-DEFAULT_REPO_ROOT = Path("/home/wnsdud/dev/chess2lichess")
+DEFAULT_REPO_ROOT: Path | None = None
 DEFAULT_TIMEOUT_SECONDS = 90
-CHESSCOM_LIVE_URL_RE = re.compile(
-    r"^https?://(www\.)?chess\.com/game/live/\d+/?(?:\?.*)?$"
+CHESSCOM_GAME_URL_RE = re.compile(
+    r"^https?://(www\.)?chess\.com/game(?:/live)?/\d+/?(?:\?.*)?$"
+)
+INSTALL_HINT = (
+    "c2l is not installed. Install chess2lichess so the `c2l` command is available on PATH, "
+    "or set C2L_COMMAND to the executable command. Optionally pass --repo-root to a local "
+    "chess2lichess checkout."
 )
 
 
-def validate_chesscom_live_url(url: str) -> None:
-    if not CHESSCOM_LIVE_URL_RE.match(url.strip()):
-        raise ValueError("Expected one chess.com live game URL.")
+def normalize_chesscom_game_url(url: str) -> str:
+    trimmed = url.strip()
+    if not CHESSCOM_GAME_URL_RE.match(trimmed):
+        raise ValueError("Expected one chess.com game URL.")
+
+    parsed = urlparse.urlparse(trimmed)
+    path = parsed.path.rstrip("/")
+    if re.fullmatch(r"/game/\d+", path):
+        path = path.replace("/game/", "/game/live/", 1)
+        return urlparse.urlunparse(parsed._replace(path=path))
+    return trimmed
 
 
 def parse_command(command: str) -> list[str]:
@@ -35,7 +48,7 @@ def parse_command(command: str) -> list[str]:
 
 
 def resolve_c2l_command(
-    explicit_command: str | None = None, repo_root: Path = DEFAULT_REPO_ROOT
+    explicit_command: str | None = None, repo_root: Path | None = DEFAULT_REPO_ROOT
 ) -> tuple[list[str], str]:
     if explicit_command:
         return parse_command(explicit_command), "explicit"
@@ -48,32 +61,30 @@ def resolve_c2l_command(
     if path_command:
         return [path_command], "path"
 
-    for binary_name in ("release", "debug"):
-        candidate = repo_root / "target" / binary_name / "c2l"
-        if candidate.is_file() and os.access(candidate, os.X_OK):
-            return [str(candidate)], f"repo-target-{binary_name}"
+    if repo_root is not None:
+        for binary_name in ("release", "debug"):
+            candidate = repo_root / "target" / binary_name / "c2l"
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return [str(candidate)], f"repo-target-{binary_name}"
 
-    cargo = shutil.which("cargo")
-    manifest_path = repo_root / "Cargo.toml"
-    if cargo and manifest_path.is_file():
-        return (
-            [
-                cargo,
-                "run",
-                "--quiet",
-                "--manifest-path",
-                str(manifest_path),
-                "--bin",
-                "c2l",
-                "--",
-            ],
-            "cargo-run",
-        )
+        cargo = shutil.which("cargo")
+        manifest_path = repo_root / "Cargo.toml"
+        if cargo and manifest_path.is_file():
+            return (
+                [
+                    cargo,
+                    "run",
+                    "--quiet",
+                    "--manifest-path",
+                    str(manifest_path),
+                    "--bin",
+                    "c2l",
+                    "--",
+                ],
+                "cargo-run",
+            )
 
-    raise FileNotFoundError(
-        "Could not find a usable c2l command. Install c2l, set C2L_COMMAND, or build "
-        f"the repository at {repo_root}."
-    )
+    raise FileNotFoundError(INSTALL_HINT)
 
 
 def parse_c2l_json_line(stdout_text: str) -> dict[str, Any]:
@@ -278,18 +289,19 @@ def enrich_lichess_context(
 def analyze_url(
     url: str,
     c2l_command: str | None = None,
-    repo_root: Path = DEFAULT_REPO_ROOT,
+    repo_root: Path | None = DEFAULT_REPO_ROOT,
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
     skip_enrichment: bool = False,
 ) -> dict[str, Any]:
-    validate_chesscom_live_url(url)
+    normalized_url = normalize_chesscom_game_url(url)
     command_argv, command_source = resolve_c2l_command(c2l_command, repo_root=repo_root)
-    c2l_payload, process = run_c2l(url, command_argv, timeout_seconds)
+    c2l_payload, process = run_c2l(normalized_url, command_argv, timeout_seconds)
 
     analysis_url = c2l_payload.get("analysis_url")
     game_id = c2l_payload.get("game_id") or extract_lichess_game_id(analysis_url)
     result = {
-        "input_url": c2l_payload.get("input_url") or url,
+        "input_url": c2l_payload.get("input_url") or normalized_url,
+        "original_input_url": url,
         "success": bool(c2l_payload.get("success")),
         "analysis_url": analysis_url,
         "game_id": game_id,
@@ -357,8 +369,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--repo-root",
-        default=str(DEFAULT_REPO_ROOT),
-        help="Fallback repository root containing the c2l Cargo.toml",
+        help="Optional local chess2lichess repository root containing the c2l Cargo.toml",
     )
     parser.add_argument(
         "--timeout-seconds",
@@ -387,7 +398,7 @@ def main(argv: list[str] | None = None) -> int:
         payload = analyze_url(
             url=args.url,
             c2l_command=args.c2l_command,
-            repo_root=Path(args.repo_root),
+            repo_root=Path(args.repo_root) if args.repo_root else None,
             timeout_seconds=args.timeout_seconds,
             skip_enrichment=args.skip_enrichment,
         )
